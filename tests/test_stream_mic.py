@@ -7,13 +7,12 @@ import torch
 
 from custom_asr import stream_mic
 from custom_asr.stream_mic import AudioError, AudioSource, WavSource, run_stream
-from test_streaming import asr, audio  # noqa: F401  (shared fixtures)
 
 needs_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 
 
 @needs_gpu
-def test_fake_realtime_source_prints_partials_then_matches_engine(asr, audio):  # noqa: F811
+def test_fake_realtime_source_prints_partials_then_matches_engine(asr, audio):
     asr.set_chunk(1)
     expected = asr.session()
     for i in range(0, len(audio), 1600):
@@ -28,11 +27,11 @@ def test_fake_realtime_source_prints_partials_then_matches_engine(asr, audio):  
     assert "slushy country roads" in final
     distinct = list(dict.fromkeys(p for p in partials if p))
     assert len(distinct) > 3
-    assert all(len(b) <= len(a) + 40 for a, b in zip(distinct, distinct[1:]))  # grows, no wholesale rewrites
+    assert all(len(b) <= len(a) + 40 for a, b in zip(distinct, distinct[1:]))  # a partial may revise its tail, not rewrite wholesale
 
 
 @needs_gpu
-def test_overrun_drops_blocks_and_warns(asr, audio):  # noqa: F811
+def test_overrun_drops_blocks_and_warns(asr, audio):
     asr.set_chunk(1)
     source = AudioSource(max_blocks=3)
     for _ in range(6):
@@ -110,8 +109,8 @@ def test_ctrl_c_feeds_queued_audio_before_final():
 
     source.blocks.get = get
     source.blocks.put(np.zeros(50, dtype=np.float32))
+    source.blocks.put(None)
     assert run_stream(_FakeASR(), source) == "final:150"
-    source.blocks.get = real_get
 
 
 def test_stream_that_stops_unexpectedly_raises():

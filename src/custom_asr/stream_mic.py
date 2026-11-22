@@ -78,15 +78,15 @@ class MicSource(AudioSource):
             )
         except Exception as e:
             raise AudioError(f"no usable input device (device={device!r}): {e}. Try --list-devices.") from e
-        self.overflows = 0
 
     def _callback(self, indata, frames, time_info, status):
-        if status.input_overflow:
-            self.overflows += 1
         self.put(indata[:, 0].copy())
 
     def _finished(self):
         self.ended = True
+
+    def close(self):
+        self._stream.close()
 
     def __enter__(self):
         try:
@@ -96,8 +96,10 @@ class MicSource(AudioSource):
         return self
 
     def __exit__(self, *exc):
-        self._stream.stop()
-        self._stream.close()
+        try:
+            self._stream.stop()
+        finally:
+            self._stream.close()
         return False
 
 
@@ -199,6 +201,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         asr = StreamingASR(chunk=args.chunk)
     except KeyboardInterrupt:
+        source.close()
         return 130
     print(f"Listening (chunk {asr.chunk_ms} ms). Speak; Ctrl+C to stop.", file=sys.stderr)
     try:

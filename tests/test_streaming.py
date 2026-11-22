@@ -1,35 +1,8 @@
-import urllib.request
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
 
-from custom_asr.engine import StreamingASR
-from custom_asr.transcribe import load_audio
-
-SAMPLE = Path(__file__).resolve().parents[1] / "data" / "sample.wav"
-SAMPLE_URL = "https://cdn-media.huggingface.co/speech_samples/sample1.flac"
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
-
-
-@pytest.fixture(scope="module")
-def asr():
-    return StreamingASR(chunk=1)
-
-
-@pytest.fixture(scope="module")
-def audio():
-    if not SAMPLE.exists():
-        import soundfile as sf
-
-        SAMPLE.parent.mkdir(exist_ok=True)
-        flac = SAMPLE.with_suffix(".flac")
-        urllib.request.urlretrieve(SAMPLE_URL, flac)
-        data, sr = sf.read(flac)
-        sf.write(SAMPLE, data, sr)
-    return load_audio(str(SAMPLE))
 
 
 def stream_in_pieces(asr, audio, sizes):
@@ -68,3 +41,17 @@ def test_partials_arrive_before_finish(asr, audio):
     assert final.startswith(partials[-1][:20])
     with pytest.raises(RuntimeError):
         session.feed(np.zeros(160, dtype=np.float32))
+
+
+def test_finish_without_enough_audio_returns_text(asr):
+    asr.set_chunk(1)
+    assert asr.session().finish() == ""
+    session = asr.session()
+    session.feed(np.zeros(400, dtype=np.float32))
+    assert isinstance(session.finish(), str)
+    assert session.finish() == session.finish()
+
+
+def test_offline_transcribe_restores_eval_mode(asr, audio):
+    asr.transcribe_offline(audio)
+    assert not asr.model.training and not asr.model.encoder.training

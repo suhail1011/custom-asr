@@ -47,12 +47,11 @@ class StreamingASR:
         """
         if chunk not in CHUNK_CHOICES:
             raise ValueError(f"chunk must be one of {CHUNK_CHOICES}, got {chunk}")
-        self.chunk = chunk
         self.model.encoder.set_default_att_context_size([70, chunk])
 
     @property
     def chunk_ms(self) -> int:
-        return (self.model.encoder.streaming_cfg.shift_size[1]) * 10
+        return self.model.encoder.streaming_cfg.shift_size[1] * 10
 
     def session(self) -> "StreamingSession":
         return StreamingSession(self)
@@ -74,8 +73,9 @@ class StreamingSession:
         enc = self.model.encoder
         self.cfg = enc.streaming_cfg
         self.n_mels = enc._feat_in
-        pre_encode = getattr(enc, "pre_encode", None)
-        self.sampling_frames = pre_encode.get_sampling_frames() if hasattr(pre_encode, "get_sampling_frames") else None
+        get_frames = getattr(getattr(enc, "pre_encode", None), "get_sampling_frames", None)
+        # minimum mel frames the subsampling needs for the first / later chunks, when the encoder reports it
+        self.sampling_frames = get_frames() if get_frames else None
 
         self.cache = enc.get_initial_cache_state(batch_size=1)
         self.hyps = None
@@ -100,6 +100,7 @@ class StreamingSession:
         samples = np.asarray(samples, dtype=np.float32).reshape(-1)
         self._audio = np.concatenate([self._audio, samples])
         self._total_samples += len(samples)
+        # frames whose full +-FEATURE_MARGIN sample window is already available
         stable = max(0, (self._total_samples - FEATURE_MARGIN - 1) // HOP + 1)
         self._compute_frames(stable, final=False)
         self._run_steps(final=False)
@@ -118,6 +119,8 @@ class StreamingSession:
     def _compute_frames(self, stable: int, final: bool) -> None:
         if not final and stable <= self._mel_frames:
             return
+        if self._total_samples == 0:
+            return  # nothing was fed; the preprocessor cannot take an empty signal
         first = max(0, self._mel_frames - LEFT_CONTEXT_FRAMES)
         offset = first * HOP - self._audio_start
         seg = torch.from_numpy(self._audio[offset:]).unsqueeze(0).to(self.asr.device)
@@ -127,6 +130,7 @@ class StreamingSession:
         new = feats[:, :, self._mel_frames - first : end - first]
         self._mel = torch.cat([self._mel, new], dim=-1)
         self._mel_frames = end
+        # keep LEFT_CONTEXT_FRAMES of audio so the next segment recomputes its left edge exactly
         drop_audio = max(0, (self._mel_frames - LEFT_CONTEXT_FRAMES) * HOP - self._audio_start)
         self._audio = self._audio[drop_audio:]
         self._audio_start += drop_audio
@@ -196,6 +200,7 @@ class StreamingSession:
 
         self._step += 1
         self._pos += shift
+        # keep the pre-encode cache plus one frame of slack for the next chunk
         keep_from = max(self._mel_start, self._pos - self.cfg.pre_encode_cache_size[1] - 1)
         if keep_from > self._mel_start:
             self._mel = self._mel[:, :, keep_from - self._mel_start :]
