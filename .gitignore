@@ -5,3 +5,7 @@ outputs/
 exp/
 *.nemo
 *.ckpt
+cache/
+runs/
+*.wav
+benchmark.toml

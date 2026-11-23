@@ -1,0 +1,37 @@
+runs_dir = "runs"
+
+[dataset]
+repository = "urgent-challenge/urgent2024_official"
+revision = "231e45142538c710ae3ec3d7c8b6e81e9f848b01"
+subset = "validation"
+split = "auto"
+cache_dir = "cache/dataset"
+
+[model]
+identifier = "nvidia/nemotron-speech-streaming-en-0.6b"
+revision = "ebe59e5a817142986528bbbee5dba8db7b38ed50"
+device = "cuda"
+precision = "fp32"
+batch_size = 8
+chunk_context = [70, 1]
+seed = 2024
+decoding = "rnnt"
+utterance_timeout_seconds = 300
+
+[audio]
+sample_rate = 16000
+max_concurrent = 100
+peak_limit = 1.0
+
+[evaluation]
+bootstrap_resamples = 10000
+bootstrap_seed = 2024
+confidence_level = 0.95
+
+[limits]
+max_cache_bytes = 10737418240
+cpu_hours = 4
+gpu_hours = 4
+network_retries = 3
+network_timeout_seconds = 600
+max_failure_rate = 0.01
