@@ -19,9 +19,20 @@ def evaluate_predictions(
             f"{len(failed)}/{len(predictions)} rows failed ({rate:.2%}); "
             f"limit is {config.limits.max_failure_rate:.2%}"
         )
-    labels = [row for row in predictions if row.get("text") not in (None, "")]
-    if predictions and not labels and any(row.get("subset") != "test_blind" for row in predictions):
+    if any(row.get("subset") not in {None, config.dataset.subset} for row in predictions):
+        raise BenchmarkError("predictions contain rows from a different dataset subset")
+    blind = config.dataset.subset == "test_blind"
+    labels = (
+        []
+        if blind
+        else [row for row in predictions if row.get("text") not in (None, "")]
+    )
+    if predictions and not labels and not blind:
         raise BenchmarkError("predictions are missing reference transcripts; scoring is not possible")
+    if not blind and any(
+        not row.get("failure") and row.get("text") in (None, "") for row in predictions
+    ):
+        raise BenchmarkError("successful predictions are missing reference transcripts")
     scores = []
     for row in labels:
         if row.get("failure"):
@@ -49,6 +60,12 @@ def evaluate_predictions(
             "corpus": {"count": 0, "wer": None, "cer": None},
             "failures": failed,
             "label_free_predictions": len(predictions),
+            "coverage": {
+                "expected": len(predictions),
+                "processed": len(predictions) - len(failed),
+                "scored": 0,
+                "complete": not failed,
+            },
         }
     by_condition: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for score in scores:

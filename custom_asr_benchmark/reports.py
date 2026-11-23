@@ -35,6 +35,13 @@ def write_reports(
             f"- Scored: {coverage.get('scored')}",
             f"- Complete: {'yes' if coverage.get('complete') else 'no'}",
         ]
+    if "label_free_predictions" in metrics:
+        lines += [
+            "",
+            "## Label-free predictions",
+            "",
+            f"- Predictions: {metrics['label_free_predictions']}",
+        ]
     for condition, summary in metrics.get("conditions", {}).items():
         corpus = summary["corpus"]
         lines += [
@@ -72,4 +79,5 @@ def _interval(value: dict[str, Any]) -> str:
     lower, upper = value.get("lower"), value.get("upper")
     if lower is None or upper is None:
         return "n/a"
-    return f"95% CI {_percent(lower)}–{_percent(upper)}"
+    confidence = value.get("confidence_level", 0.95) * 100
+    return f"{confidence:g}% CI {_percent(lower)}–{_percent(upper)}"

@@ -4,7 +4,8 @@ import pytest
 
 from custom_asr_benchmark.cli import main
 from custom_asr_benchmark.config import BenchmarkConfig
-from custom_asr_benchmark.pipeline import evaluate
+from custom_asr_benchmark.errors import BenchmarkError
+from custom_asr_benchmark.pipeline import _reserve_test_access, evaluate
 from custom_asr_benchmark.reports import write_reports
 from custom_asr_benchmark.tracking import new_run
 
@@ -15,8 +16,6 @@ def test_run_and_index_are_append_only(tmp_path):
     first.append_index({"status": "complete"})
     second = new_run(tmp_path)
     second.append_index({"status": "complete"})
-    from custom_asr_benchmark.errors import BenchmarkError
-
     with pytest.raises(BenchmarkError):
         first.write_json("resolved-config.json", {"x": 2})
     entries = [json.loads(line) for line in (tmp_path / "index.jsonl").read_text().splitlines()]
@@ -28,6 +27,22 @@ def test_report_outputs_csv_and_markdown(tmp_path):
     _, markdown = write_reports(tmp_path, [score], {"corpus": {"wer": 0, "cer": 0, "count": 1}})
     assert "WER: 0.00%" in markdown.read_text()
     assert (tmp_path / "utterances.csv").read_text().startswith("id,condition")
+
+
+def test_report_uses_configured_interval_level(tmp_path):
+    score = {"id": "x", "condition": "noisy", "reference": "a", "hypothesis": "a"}
+    metrics = {
+        "corpus": {"wer": 0, "cer": 0, "count": 1},
+        "conditions": {
+            "noisy": {
+                "corpus": {"wer": 0, "cer": 0, "count": 1},
+                "wer_ci": {"lower": 0, "upper": 0, "confidence_level": 0.9},
+                "cer_ci": {"lower": 0, "upper": 0, "confidence_level": 0.9},
+            }
+        },
+    }
+    _, markdown = write_reports(tmp_path, [score], metrics)
+    assert "90% CI" in markdown.read_text()
 
 
 def test_cli_reports_invalid_config_without_traceback(tmp_path, capsys):
@@ -65,3 +80,60 @@ def test_evaluation_step_appends_completed_run(tmp_path):
     index = [json.loads(line) for line in (tmp_path / "runs" / "index.jsonl").read_text().splitlines()]
     assert index[0]["run_id"] == "test-run"
     assert (run_path / "status.complete.json").is_file()
+
+
+def test_test_nonblind_access_is_full_set_and_single_use(tmp_path):
+    config = BenchmarkConfig.from_mapping(
+        {
+            "dataset": {
+                "revision": "a" * 40,
+                "subset": "test_nonblind",
+                "cache_dir": str(tmp_path / "cache"),
+            },
+            "model": {"revision": "b" * 40},
+            "runs_dir": str(tmp_path / "runs"),
+        }
+    )
+    with pytest.raises(BenchmarkError, match="full-set"):
+        _reserve_test_access(config, limit=1, sample_id=None)
+    _reserve_test_access(config, limit=None, sample_id=None)
+    with pytest.raises(BenchmarkError, match="already reserved"):
+        _reserve_test_access(config, limit=None, sample_id=None)
+
+
+def test_partial_run_is_not_indexed_as_complete(tmp_path):
+    config = BenchmarkConfig.from_mapping(
+        {
+            "dataset": {"revision": "a" * 40, "cache_dir": str(tmp_path / "cache")},
+            "model": {"revision": "b" * 40},
+            "evaluation": {"bootstrap_resamples": 10},
+            "limits": {"max_failure_rate": 0.01},
+            "runs_dir": str(tmp_path / "runs"),
+        }
+    )
+    run_path = tmp_path / "runs" / "partial-run"
+    run_path.mkdir(parents=True)
+    resolved = __import__("dataclasses").asdict(config)
+    (run_path / "resolved-config.json").write_text(json.dumps(resolved, sort_keys=True))
+    (run_path / "identity.json").write_text(json.dumps({"sample_limit": None}))
+    predictions = [
+        {
+            "id": str(index),
+            "condition": "noisy",
+            "subset": "validation",
+            "text": "hello",
+            "text_prediction": "hello",
+            "failure": "timeout" if index == 0 else None,
+        }
+        for index in range(100)
+    ]
+    (run_path / "predictions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in predictions)
+    )
+
+    metrics, _csv, _report = evaluate(config, run_path)
+
+    assert not metrics["coverage"]["complete"]
+    assert (run_path / "status.partial.json").is_file()
+    assert not (run_path / "status.complete.json").exists()
+    assert not (tmp_path / "runs" / "index.jsonl").exists()

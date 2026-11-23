@@ -26,12 +26,13 @@ def materialize_audio(
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "manifest.jsonl"
     if manifest_path.is_file():
-        with manifest_path.open() as stream:
-            manifest = [json.loads(line) for line in stream if line.strip()]
-        missing = [item["audio_filepath"] for item in manifest if not Path(item["audio_filepath"]).is_file()]
-        if not missing:
-            return manifest, manifest_path
-        raise DataError(f"audio cache is incomplete: {len(missing)} manifest paths are missing")
+        try:
+            with manifest_path.open() as stream:
+                manifest = [json.loads(line) for line in stream if line.strip()]
+            _validate_cached_manifest(manifest, rows, target_rate)
+        except (json.JSONDecodeError, KeyError, OSError, RuntimeError, ValueError) as exc:
+            raise DataError(f"audio cache manifest is invalid or stale: {exc}") from exc
+        return manifest, manifest_path
     audio_root = root / "audio"
     audio_root.mkdir(parents=True, exist_ok=True)
     jobs: list[tuple[dict[str, Any], str]] = []
@@ -60,7 +61,7 @@ def materialize_audio(
                 item = {
                     "audio_filepath": audio["path"],
                     "duration": audio["duration"],
-                    "text": row.get("transcript", ""),
+                    "text": "" if row.get("_subset") == "test_blind" else row.get("transcript", ""),
                     "id": row["id"],
                     "condition": "clean" if field == "clean_audio" else "noisy",
                     "subset": row.get("_subset"),
@@ -88,6 +89,10 @@ def prepare_waveform(
     source_rate = value.get("sampling_rate") or decoded_rate or fallback_rate
     if source_rate is None:
         raise DataError("audio has no sampling_rate")
+    if decoded_rate is not None and int(source_rate) != decoded_rate:
+        raise DataError(
+            f"audio sampling_rate {source_rate} does not match decoded rate {decoded_rate}"
+        )
     if samples.ndim == 2:
         samples = samples.mean(axis=1)
     if samples.ndim != 1 or samples.size == 0:
@@ -112,18 +117,8 @@ def _write_audio(
     value = row[field]
     samples = prepare_waveform(value, target_rate, peak_limit, row["sampling_rate"])
     digest = hashlib.sha256(samples.astype("<f4").tobytes()).hexdigest()
-    source_digest = hashlib.sha256()
     source_rate = value.get("sampling_rate") or row["sampling_rate"]
-    source_digest.update(str(int(source_rate)).encode())
-    if value.get("bytes") is not None:
-        source_digest.update(value["bytes"])
-    elif value.get("array") is not None:
-        source = np.asarray(value["array"])
-        source_digest.update(source.astype(source.dtype.newbyteorder("<"), copy=False).tobytes())
-    elif value.get("path"):
-        with Path(value["path"]).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                source_digest.update(chunk)
+    source_digest = _source_checksum(value, source_rate)
     path = root / f"{digest}.wav"
     with write_lock:
         if not path.exists():
@@ -133,7 +128,7 @@ def _write_audio(
     return {
         "path": str(path.resolve()),
         "duration": len(samples) / target_rate,
-        "source_checksum": source_digest.hexdigest(),
+        "source_checksum": source_digest,
     }
 
 
@@ -147,3 +142,59 @@ def _decode_audio(value: dict[str, Any]) -> tuple[np.ndarray, int | None]:
         samples, rate = sf.read(value["path"], dtype="float32", always_2d=True)
         return samples, rate
     raise DataError("audio contains neither samples, bytes, nor a local path")
+
+
+def _source_checksum(value: dict[str, Any], source_rate: int) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(int(source_rate)).encode())
+    if value.get("bytes") is not None:
+        digest.update(value["bytes"])
+    elif value.get("array") is not None:
+        source = np.asarray(value["array"])
+        digest.update(source.astype(source.dtype.newbyteorder("<"), copy=False).tobytes())
+    elif value.get("path"):
+        with Path(value["path"]).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    else:
+        raise DataError("audio contains neither samples, bytes, nor a local path")
+    return digest.hexdigest()
+
+
+def _validate_cached_manifest(
+    manifest: list[dict[str, Any]], rows: list[dict[str, Any]], target_rate: int
+) -> None:
+    expected: list[tuple[dict[str, Any], str]] = []
+    for row in rows:
+        fields = ["clean_audio", "noisy_audio"] if "clean_audio" in row else ["noisy_audio"]
+        expected.extend((row, field) for field in fields)
+    if len(manifest) != len(expected):
+        raise DataError(f"audio cache row count changed ({len(manifest)} != {len(expected)})")
+    for item, (row, field) in zip(manifest, expected):
+        condition = "clean" if field == "clean_audio" else "noisy"
+        source_rate = row[field].get("sampling_rate") or row["sampling_rate"]
+        source_checksum = _source_checksum(row[field], source_rate)
+        expected_text = "" if row.get("_subset") == "test_blind" else row.get("transcript", "")
+        if (
+            item["id"] != row["id"]
+            or item["condition"] != condition
+            or item["text"] != expected_text
+            or item["subset"] != row.get("_subset")
+            or item["sampling_rate"] != target_rate
+            or item["source_checksum"] != source_checksum
+        ):
+            raise DataError(f"audio cache identity changed for {row['id']} ({condition})")
+        path = Path(item["audio_filepath"])
+        if not path.is_file():
+            raise DataError(f"cached audio is missing: {path}")
+        samples, rate = sf.read(path, dtype="float32", always_2d=True)
+        if rate != target_rate or samples.shape[1] != 1:
+            raise DataError(f"cached audio is not mono {target_rate} Hz: {path}")
+        waveform_checksum = hashlib.sha256(
+            samples[:, 0].astype("<f4", copy=False).tobytes()
+        ).hexdigest()
+        if path.name != f"{waveform_checksum}.wav":
+            raise DataError(f"cached audio content does not match its checksum: {path}")
+        expected_duration = len(samples) / target_rate
+        if abs(float(item["duration"]) - expected_duration) > 1 / target_rate:
+            raise DataError(f"cached audio duration is stale for {row['id']} ({condition})")

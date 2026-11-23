@@ -78,17 +78,19 @@ def score_pair(reference: str, hypothesis: str) -> dict[str, Any]:
 def corpus_metrics(scores: Sequence[dict[str, Any]]) -> dict[str, Any]:
     if not scores:
         return {"count": 0, "wer": None, "cer": None}
+    wers = sorted(score["wer"] for score in scores)
+    cers = sorted(score["cer"] for score in scores)
     return {
         "count": len(scores),
         "wer": sum(score["word_edits"] for score in scores) / max(sum(score["reference_words"] for score in scores), 1),
         "cer": sum(score["character_edits"] for score in scores) / max(sum(score["reference_characters"] for score in scores), 1),
         "utterance_wer": {
             "mean": sum(score["wer"] for score in scores) / len(scores),
-            "median": sorted(score["wer"] for score in scores)[len(scores) // 2],
+            "median": _median(wers),
         },
         "utterance_cer": {
             "mean": sum(score["cer"] for score in scores) / len(scores),
-            "median": sorted(score["cer"] for score in scores)[len(scores) // 2],
+            "median": _median(cers),
         },
         "operations": {
             operation: sum(score["operations"][operation] for score in scores)
@@ -97,3 +99,8 @@ def corpus_metrics(scores: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _median(values: list[float]) -> float:
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) / 2

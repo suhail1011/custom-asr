@@ -32,6 +32,14 @@ def test_config_rejects_unapproved_limits():
                 "limits": {"cpu_hours": 5},
             }
         )
+    with pytest.raises(ConfigError, match="cannot exceed three"):
+        BenchmarkConfig.from_mapping(
+            {
+                "dataset": {"revision": "a" * 40},
+                "model": {"revision": "b" * 40},
+                "limits": {"network_retries": 4},
+            }
+        )
 
 
 def test_config_rejects_unknown_keys_and_wrong_model():

@@ -88,7 +88,11 @@ class EvaluationConfig:
     confidence_level: float = 0.95
 
     def __post_init__(self) -> None:
-        if self.bootstrap_resamples < 1 or self.confidence_level <= 0 or self.confidence_level >= 1:
+        if (
+            not 1 <= self.bootstrap_resamples <= 10_000
+            or self.confidence_level <= 0
+            or self.confidence_level >= 1
+        ):
             raise ConfigError("invalid evaluation confidence interval settings")
 
 
@@ -106,7 +110,9 @@ class LimitsConfig:
             raise ConfigError("limits.max_cache_bytes cannot exceed 10 GiB")
         if not 0 < self.cpu_hours <= 4 or not 0 < self.gpu_hours <= 4:
             raise ConfigError("CPU and GPU limits must be positive and cannot exceed four hours")
-        if self.network_retries < 0 or self.network_timeout_seconds < 1:
+        if not 0 <= self.network_retries <= 3:
+            raise ConfigError("limits.network_retries cannot exceed three")
+        if not 1 <= self.network_timeout_seconds <= 600:
             raise ConfigError("invalid network retry settings")
         if not 0 <= self.max_failure_rate < 1:
             raise ConfigError("limits.max_failure_rate must be in [0, 1)")

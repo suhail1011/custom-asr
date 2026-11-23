@@ -23,15 +23,9 @@ def prepare(
     limit: int | None = None,
     sample_id: str | None = None,
 ):
-    started = time.monotonic()
+    started_cpu = time.process_time()
     _check_total_capacity(config)
-    if config.dataset.subset == "test_nonblind":
-        index = Path(config.runs_dir) / "index.jsonl"
-        if index.is_file() and any(
-            entry.get("subset") == "test_nonblind" and entry.get("status") == "complete"
-            for entry in (json.loads(line) for line in index.read_text().splitlines() if line)
-        ):
-            raise BenchmarkError("test_nonblind has already been scored; its final test access is single-use")
+    _reserve_test_access(config, limit=limit, sample_id=sample_id)
     rows, dataset_sha = load_dataset(config, limit=limit, sample_id=sample_id)
     cache = (
         Path(config.dataset.cache_dir)
@@ -50,7 +44,8 @@ def prepare(
         peak_limit=config.audio.peak_limit,
         max_concurrent=config.audio.max_concurrent,
     )
-    if time.monotonic() - started > config.limits.cpu_hours * 3600:
+    stage_cpu_seconds = time.process_time() - started_cpu
+    if stage_cpu_seconds > config.limits.cpu_hours * 3600:
         raise BenchmarkError("prepare exceeded the approved CPU-time budget")
     _check_total_capacity(config)
     run = new_run(Path(config.runs_dir))
@@ -77,14 +72,17 @@ def prepare(
             "status": "prepared",
             "rows": len(manifest),
             "manifest": str((run.path / "prepared-manifest.jsonl").resolve()),
+            "cpu_seconds": stage_cpu_seconds,
         },
     )
     return run
 
 
 def infer(config: BenchmarkConfig, run_path: str | Path) -> list[dict[str, Any]]:
+    started_cpu = time.process_time()
     run_path = Path(run_path)
     _verify_run_config(config, run_path)
+    _check_total_capacity(config)
     for artifact in ("predictions.jsonl", "model-identity.json", "status.inferred.json"):
         if (run_path / artifact).exists():
             raise BenchmarkError(f"immutable run artifact already exists: {artifact}")
@@ -94,6 +92,7 @@ def infer(config: BenchmarkConfig, run_path: str | Path) -> list[dict[str, Any]]
     manifest = [json.loads(line) for line in manifest_path.read_text().splitlines() if line]
     runner = NemoRunner(config)
     predictions = runner.transcribe(manifest)
+    stage_cpu_seconds, total_cpu_seconds = _cpu_budget(config, run_path, started_cpu)
     with (run_path / "predictions.jsonl").open("x") as stream:
         for row in predictions:
             stream.write(json.dumps(row, sort_keys=True, default=str) + "\n")
@@ -106,7 +105,7 @@ def infer(config: BenchmarkConfig, run_path: str | Path) -> list[dict[str, Any]]
                     "checkpoint": str(runner.checkpoint_path),
                     "checkpoint_sha256": runner.checkpoint_sha256,
                     "precision": config.model.precision,
-                    "device": config.model.device,
+                    "device": runner.device_final or config.model.device,
                     "chunk_context": config.model.chunk_context,
                     "seed": config.model.seed,
                     "decoding": config.model.decoding,
@@ -118,13 +117,22 @@ def infer(config: BenchmarkConfig, run_path: str | Path) -> list[dict[str, Any]]
             )
             + "\n"
         )
-    _write_status(run_path, "inferred", predictions=len(predictions))
+    _write_status(
+        run_path,
+        "inferred",
+        predictions=len(predictions),
+        cpu_seconds=stage_cpu_seconds,
+        cpu_seconds_total=total_cpu_seconds,
+    )
+    _check_total_capacity(config)
     return predictions
 
 
 def evaluate(config: BenchmarkConfig, run_path: str | Path):
+    started_cpu = time.process_time()
     run_path = Path(run_path)
     _verify_run_config(config, run_path)
+    _check_total_capacity(config)
     for artifact in ("metrics.json", "utterance-scores.jsonl", "utterances.csv", "report.md", "status.complete.json"):
         if (run_path / artifact).exists():
             raise BenchmarkError(f"immutable run artifact already exists: {artifact}")
@@ -133,31 +141,55 @@ def evaluate(config: BenchmarkConfig, run_path: str | Path):
         raise BenchmarkError(f"{run_path} has no predictions.jsonl")
     predictions = [json.loads(line) for line in path.read_text().splitlines() if line]
     scores, metrics = evaluate_predictions(predictions, config)
+    stage_cpu_seconds, total_cpu_seconds = _cpu_budget(config, run_path, started_cpu)
     with (run_path / "utterance-scores.jsonl").open("x") as stream:
         for row in scores:
             stream.write(json.dumps(row, sort_keys=True) + "\n")
     with (run_path / "metrics.json").open("x") as stream:
         stream.write(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     csv_path, report_path = write_reports(run_path, scores, metrics)
-    _write_status(run_path, "complete", scored=len(scores), complete=True)
-    append_run_index(
-        Path(config.runs_dir),
-        run_path.name,
-        run_path,
-        {
-            "status": "complete",
-            "dataset_revision": config.dataset.revision,
-            "model_revision": config.model.revision,
-            "subset": config.dataset.subset,
-            "sample_limit": json.loads((run_path / "identity.json").read_text()).get("sample_limit"),
-            "sample_id": json.loads((run_path / "identity.json").read_text()).get("sample_id"),
-            "wer": metrics["corpus"].get("wer"),
-            "cer": metrics["corpus"].get("cer"),
-            "report": str(report_path.resolve()),
-            "utterances": str(csv_path.resolve()),
-            "predictions": str(path.resolve()),
-        },
-    )
+    _check_total_capacity(config)
+    coverage_complete = metrics.get("coverage", {}).get("complete", True)
+    if coverage_complete:
+        _write_status(
+            run_path,
+            "complete",
+            scored=len(scores),
+            complete=True,
+            cpu_seconds=stage_cpu_seconds,
+            cpu_seconds_total=total_cpu_seconds,
+        )
+        append_run_index(
+            Path(config.runs_dir),
+            run_path.name,
+            run_path,
+            {
+                "status": "complete",
+                "dataset_revision": config.dataset.revision,
+                "model_revision": config.model.revision,
+                "subset": config.dataset.subset,
+                "sample_limit": json.loads((run_path / "identity.json").read_text()).get(
+                    "sample_limit"
+                ),
+                "sample_id": json.loads((run_path / "identity.json").read_text()).get(
+                    "sample_id"
+                ),
+                "wer": metrics["corpus"].get("wer"),
+                "cer": metrics["corpus"].get("cer"),
+                "report": str(report_path.resolve()),
+                "utterances": str(csv_path.resolve()),
+                "predictions": str(path.resolve()),
+            },
+        )
+    else:
+        _write_status(
+            run_path,
+            "partial",
+            scored=len(scores),
+            complete=False,
+            cpu_seconds=stage_cpu_seconds,
+            cpu_seconds_total=total_cpu_seconds,
+        )
     return metrics, csv_path, report_path
 
 
@@ -192,6 +224,55 @@ def _check_total_capacity(config: BenchmarkConfig) -> None:
         raise BenchmarkError(
             f"local cache/results use {used} bytes (combined limit {config.limits.max_cache_bytes})"
         )
+
+
+def _cpu_budget(
+    config: BenchmarkConfig, run_path: Path, started_cpu: float
+) -> tuple[float, float]:
+    stage = time.process_time() - started_cpu
+    previous = 0.0
+    for name in ("status.prepared.json", "status.inferred.json"):
+        path = run_path / name
+        if path.is_file():
+            previous += float(json.loads(path.read_text()).get("cpu_seconds", 0.0))
+    total = previous + stage
+    if total > config.limits.cpu_hours * 3600:
+        raise BenchmarkError("run exceeded the approved cumulative CPU-time budget")
+    return stage, total
+
+
+def _reserve_test_access(
+    config: BenchmarkConfig, *, limit: int | None, sample_id: str | None
+) -> None:
+    if config.dataset.subset != "test_nonblind":
+        return
+    if limit is not None or sample_id is not None:
+        raise BenchmarkError("test_nonblind is reserved for one full-set final scoring run")
+    index = Path(config.runs_dir) / "index.jsonl"
+    if index.is_file() and any(
+        entry.get("subset") == "test_nonblind" and entry.get("status") == "complete"
+        for entry in (json.loads(line) for line in index.read_text().splitlines() if line)
+    ):
+        raise BenchmarkError("test_nonblind has already been scored; its final test access is single-use")
+    marker = Path(config.runs_dir) / "test_nonblind.access"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with marker.open("x") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "dataset_revision": config.dataset.revision,
+                        "model_revision": config.model.revision,
+                        "reserved_at_unix": time.time(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    except FileExistsError as exc:
+        raise BenchmarkError(
+            "test_nonblind access is already reserved by a prepared or in-progress run"
+        ) from exc
 
 
 def _verify_run_config(config: BenchmarkConfig, run_path: Path) -> None:

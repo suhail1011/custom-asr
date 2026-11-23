@@ -64,7 +64,12 @@ def paired_comparison(
     clean_pairs = [clean_by_id[key] for key in common]
     noisy_pairs = [noisy_by_id[key] for key in common]
     rng = np.random.default_rng(seed)
-    result: dict[str, Any] = {"paired_count": len(common), "unmatched_clean": len(clean) - len(common), "unmatched_noisy": len(noisy) - len(common)}
+    result: dict[str, Any] = {
+        "paired_count": len(common),
+        "unmatched_clean": len(clean) - len(common),
+        "unmatched_noisy": len(noisy) - len(common),
+        "confidence_level": confidence_level,
+    }
     for metric, edit_key, reference_key in (
         ("wer", "word_edits", "reference_words"),
         ("cer", "character_edits", "reference_characters"),
@@ -91,6 +96,7 @@ def paired_comparison(
             "mean_delta": noisy_estimate - clean_estimate,
             "lower": float(np.quantile(samples, alpha)),
             "upper": float(np.quantile(samples, 1 - alpha)),
+            "confidence_level": confidence_level,
             "positive_count": sum(value > 0 for value in utterance_deltas),
             "negative_count": sum(value < 0 for value in utterance_deltas),
             "zero_count": sum(value == 0 for value in utterance_deltas),

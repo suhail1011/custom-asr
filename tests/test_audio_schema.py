@@ -1,3 +1,5 @@
+import io
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -18,6 +20,17 @@ def test_audio_is_deterministic_mono_16khz_and_clipped():
     assert np.max(np.abs(waveform)) == pytest.approx(1.0)
 
 
+def test_encoded_audio_metadata_must_match_decoded_sampling_rate():
+    encoded = io.BytesIO()
+    sf.write(encoded, np.zeros(240, dtype=np.float32), 24000, format="WAV", subtype="FLOAT")
+    with pytest.raises(DataError, match="does not match decoded rate"):
+        prepare_waveform(
+            {"bytes": encoded.getvalue(), "sampling_rate": 16000},
+            16000,
+            1.0,
+        )
+
+
 def test_materialize_uses_content_addresses_and_manifest(tmp_path):
     row = {
         "id": "sample",
@@ -36,6 +49,20 @@ def test_materialize_uses_content_addresses_and_manifest(tmp_path):
         assert len(data) == 1600
     assert len(list((tmp_path / "audio").glob("*.wav"))) == 2
     assert len(path.read_text().splitlines()) == 2
+
+
+def test_materialize_rejects_a_stale_manifest(tmp_path):
+    row = {
+        "id": "sample",
+        "sampling_rate": 16000,
+        "transcript": "Hello",
+        "noisy_audio": {"array": np.array([0.1], dtype=np.float32), "sampling_rate": 16000},
+    }
+    first, _ = materialize_audio([row], tmp_path)
+    changed = {**row, "transcript": "Goodbye"}
+    with pytest.raises(DataError, match="identity changed"):
+        materialize_audio([changed], tmp_path)
+    assert first[0]["text"] == "Hello"
 
 
 def test_schema_rejects_duplicate_ids():

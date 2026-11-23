@@ -21,6 +21,7 @@ class NemoRunner:
         self.model = None
         self.checkpoint_path: Path | None = None
         self.checkpoint_sha256: str | None = None
+        self.device_final: str | None = None
         self.batch_size_final = config.model.batch_size
         self.gpu_seconds = 0.0
 
@@ -61,6 +62,7 @@ class NemoRunner:
                 restore_path=str(self.checkpoint_path),
                 map_location=device,
             )
+            self.device_final = str(device)
         except Exception as exc:
             raise BenchmarkError(f"failed to restore approved checkpoint: {exc}") from exc
         self.model.eval()
@@ -96,7 +98,7 @@ class NemoRunner:
                         return_hypotheses=True,
                         timestamps=True,
                     ),
-                    self.config.model.utterance_timeout_seconds,
+                    self.config.model.utterance_timeout_seconds * len(batch),
                 )
                 runtime = time.monotonic() - started
                 self.gpu_seconds += runtime
